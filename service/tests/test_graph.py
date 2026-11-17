@@ -83,7 +83,7 @@ def test_infeasible_budget_skips_llm(monkeypatch):
     )
 
     assert result["status"] == "failed"
-    assert "6.0" in result["infeasible_reason"]
+    assert "12.0" in result["infeasible_reason"]
     assert result["plan"] is None
     assert result["retry_count"] == 0
 

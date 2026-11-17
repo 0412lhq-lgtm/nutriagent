@@ -94,4 +94,4 @@ def prompt_table() -> str:
 
 
 # 满足一日三餐 + 最低营养所需的最低可行预算（按本表估算）
-MIN_DAILY_COST = 6.0
+MIN_DAILY_COST = 12.0
