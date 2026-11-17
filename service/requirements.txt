@@ -1,0 +1,10 @@
+# Docker 镜像用的最小运行依赖（本地开发仍用 uv + pyproject.toml）
+# 版本与当前 .venv 中实测通过的版本一致
+fastapi==0.163.1
+uvicorn==0.54.0
+pydantic==2.14.3
+pydantic-settings==2.16.3
+sqlalchemy==2.1.8
+pymysql[rsa]==1.2.4
+openai==3.51.0
+langgraph==1.2.22

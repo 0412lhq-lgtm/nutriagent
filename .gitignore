@@ -1,0 +1,32 @@
+# ---- 环境变量 / 密钥（绝对不能提交）----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ---- Python ----
+.venv/
+venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ---- 前端 ----
+node_modules/
+dist/
+.vite/
+
+# ---- IDE / 系统文件 ----
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# ---- 日志 / 本地数据 ----
+*.log
+*.sqlite
+*.sqlite3
