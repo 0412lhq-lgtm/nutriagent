@@ -3,7 +3,7 @@ from typing import Literal, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from app.agent.food_table import MIN_DAILY_COST
-from app.agent.llm import DeepSeekLLM, MockLLM
+from app.agent.llm import DeepSeekLLM, MockLLM, PlanGenerationError
 from app.agent.tools import (
     calculate_bmi,
     calculate_bmr,
@@ -13,13 +13,15 @@ from app.agent.tools import (
     check_nutrition,
 )
 from app.config import settings
-from app.schemas import DietPlan, DietRequest
+from app.schemas import DietPlan, DietRequest, JudgeVerdict
 
 
 class AgentState(TypedDict):
     request: DietRequest
     plan: DietPlan | None
     violations: list[str]
+    quality_verdict: JudgeVerdict | None
+    quality_feedback: list[str]
     retry_count: int
     max_retries: int
     status: Literal["pending", "success", "failed"]
@@ -64,9 +66,10 @@ def route_after_feasibility(state: AgentState) -> Literal["infeasible", "generat
 
 
 def generate(state: AgentState) -> dict:
+    feedback = state["violations"] + state.get("quality_feedback", [])
     plan = _llm.generate_plan(
         state["request"],
-        feedback=state["violations"] or None,
+        feedback=feedback or None,
     )
     return {"plan": plan}
 
@@ -84,7 +87,45 @@ def review(state: AgentState) -> dict:
     )
     return {
         "violations": violations,
-        "status": "success" if not violations else "pending",
+        "status": "pending",
+    }
+
+
+def quality_review(state: AgentState) -> dict:
+    """独立质量审查节点：只输出判定和意见，不修改食谱。"""
+    plan = state["plan"]
+    if plan is None:
+        return {
+            "quality_verdict": None,
+            "quality_feedback": ["质量审查失败：没有可供审查的食谱"],
+            "status": "failed",
+        }
+
+    try:
+        verdict = _llm.judge_plan(
+            state["request"],
+            plan,
+            bmi=state["bmi"] or 0.0,
+            bmr=state["bmr"] or 0.0,
+        )
+    except PlanGenerationError as e:
+        return {
+            "quality_verdict": None,
+            "quality_feedback": [f"质量审查失败：{e}"],
+            "status": "failed",
+        }
+
+    feedback = [
+        (
+            f"[质量审查/{issue.severity}] {issue.evidence}"
+            f"；建议：{issue.suggestion}"
+        )
+        for issue in verdict.issues
+    ]
+    return {
+        "quality_verdict": verdict,
+        "quality_feedback": feedback,
+        "status": "success" if verdict.approved else "pending",
     }
 
 
@@ -96,9 +137,20 @@ def fallback(state: AgentState) -> dict:
     return {"status": "failed"}
 
 
-def route_after_review(state: AgentState) -> Literal["accept", "retry", "fail"]:
+def route_after_review(state: AgentState) -> Literal["quality", "retry", "fail"]:
     if not state["violations"]:
+        return "quality"
+    if state["retry_count"] >= state["max_retries"]:
+        return "fail"
+    return "retry"
+
+
+def route_after_quality(state: AgentState) -> Literal["accept", "retry", "fail"]:
+    verdict = state.get("quality_verdict")
+    if verdict is not None and verdict.approved:
         return "accept"
+    if state["status"] == "failed":
+        return "fail"
     if state["retry_count"] >= state["max_retries"]:
         return "fail"
     return "retry"
@@ -111,6 +163,7 @@ def build_graph():
     builder.add_node("check_feasibility", check_feasibility)
     builder.add_node("generate", generate)
     builder.add_node("review", review)
+    builder.add_node("quality_review", quality_review)
     builder.add_node("prepare_retry", prepare_retry)
     builder.add_node("fallback", fallback)
 
@@ -125,6 +178,11 @@ def build_graph():
     builder.add_conditional_edges(
         "review",
         route_after_review,
+        {"quality": "quality_review", "retry": "prepare_retry", "fail": "fallback"},
+    )
+    builder.add_conditional_edges(
+        "quality_review",
+        route_after_quality,
         {"accept": END, "retry": "prepare_retry", "fail": "fallback"},
     )
     builder.add_edge("prepare_retry", "generate")

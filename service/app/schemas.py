@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 
 class DietRequest(BaseModel):
@@ -39,4 +39,37 @@ class Meal(BaseModel):
 class DietPlan(BaseModel):
     meals:list[Meal]=Field(min_length=1)
     notes :str=""
+
+
+class QualityIssue(BaseModel):
+    category: Literal[
+        "meal_structure",
+        "ingredient_pairing",
+        "portion",
+        "cooking",
+        "variety",
+        "goal_alignment",
+        "other",
+    ]
+    severity: Literal["blocking", "major", "minor"]
+    evidence: str = Field(min_length=1, description="具体餐次、菜品或食材依据")
+    suggestion: str = Field(min_length=1, description="可执行的修改建议")
+
+
+class JudgeVerdict(BaseModel):
+    approved: bool
+    score: int = Field(ge=0, le=100)
+    issues: list[QualityIssue] = Field(default_factory=list)
+    summary: str = ""
+
+    @model_validator(mode="after")
+    def check_decision_consistency(self) -> "JudgeVerdict":
+        has_blocking = any(
+            issue.severity == "blocking" for issue in self.issues
+        )
+        if self.approved and has_blocking:
+            raise ValueError("存在 blocking 问题时不能批准食谱")
+        if not self.approved and not has_blocking:
+            raise ValueError("否决食谱时必须至少给出一个 blocking 问题")
+        return self
 

@@ -46,6 +46,8 @@ def create_diet_plan(request: DietRequest):
             "retry_count": 0,
             "max_retries": settings.agent.max,
             "status": "pending",
+            "quality_verdict": None,
+            "quality_feedback": [],
             "bmi": None,
             "bmr": None,
             "infeasible_reason": None,
@@ -57,10 +59,11 @@ def create_diet_plan(request: DietRequest):
         raise HTTPException(status_code=422, detail=result["infeasible_reason"])
 
     plan = result["plan"]
+    feedback = result["violations"] + result.get("quality_feedback", [])
     record = DietRecord(
         request_data=request.model_dump(),
         final_plan=decorate_plan(plan) if result["status"] == "success" and plan else None,
-        review_feedback="\n".join(result["violations"]) or None,
+        review_feedback="\n".join(feedback) or None,
         retry_count=result["retry_count"],
         status=result["status"],
     )

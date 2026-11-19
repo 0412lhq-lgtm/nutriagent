@@ -1,9 +1,9 @@
 import json
 from app.agent.food_table import MIN_DAILY_COST, prompt_table
-from app.agent.tools import calculate_bmr, min_daily_kcal, min_daily_protein
+from app.agent.tools import analyze_plan, calculate_bmr, min_daily_kcal, min_daily_protein
 from pydantic import ValidationError
 from openai import OpenAI, OpenAIError
-from app.schemas import DietPlan, DietRequest
+from app.schemas import DietPlan, DietRequest, JudgeVerdict, QualityIssue
 from app.config import settings
 
 class MockLLM:
@@ -98,6 +98,34 @@ class MockLLM:
             "notes": "Mock 根据反馈重写：已去除过敏原并压低成本",
         }
 
+    def judge_plan(
+            self,
+            request: DietRequest,
+            plan: DietPlan,
+            bmi: float,
+            bmr: float,
+    ) -> JudgeVerdict:
+        """模拟质量审查：初次生成的 Mock 方案被否决，重写后的方案通过。"""
+        if plan.notes.startswith("Mock 初次"):
+            return JudgeVerdict(
+                approved=False,
+                score=30,
+                issues=[
+                    QualityIssue(
+                        category="meal_structure",
+                        severity="blocking",
+                        evidence="Mock 初次方案缺少晚餐，三餐结构不完整",
+                        suggestion="补充一顿包含主食、蛋白质和蔬菜的晚餐",
+                    )
+                ],
+                summary="Mock 初审否决",
+            )
+        return JudgeVerdict(
+            approved=True,
+            score=92,
+            summary="Mock 质量审查通过",
+        )
+
 
 
 SYSTEM_PROMPT = (
@@ -110,6 +138,21 @@ SYSTEM_PROMPT = (
     "不要只给最低成本的搭配。"
     "只输出符合给定 JSON 结构的数据，不要输出任何解释性文字。"
 )
+
+JUDGE_SYSTEM_PROMPT = (
+    "你是一名独立的食谱质量审查员，只对确定性规则无法判断的质量问题行使否决权。"
+    "系统给出的成本、热量、蛋白质、BMI 和 BMR 均来自 Python 工具，是事实数据，"
+    "禁止重新计算或质疑它们，也不要审查过敏原、预算等已经由硬规则检查的内容。"
+    "你只审查：三餐结构是否完整、菜品与食材搭配是否合理、份量是否现实、"
+    "烹饪方式是否可行、菜品是否严重重复、方案是否明显偏离用户目标。"
+    "禁止因为个人口味、风格偏好或缺乏证据的猜测而否决。"
+    "每个 blocking 问题必须写明具体餐次、菜品或食材作为 evidence，并给出可执行的 suggestion。"
+    "只有存在 blocking 问题时才能 approved=false；没有 blocking 问题时 approved 必须为 true，"
+    "其他问题可使用 major 或 minor。"
+    "只输出符合给定 JSON 结构的对象，不要输出解释性文字。"
+)
+
+
 class PlanGenerationError(Exception):
     """真实模型多次尝试后仍无法产出合法食谱。"""
 class DeepSeekLLM():
@@ -146,6 +189,38 @@ class DeepSeekLLM():
         raise PlanGenerationError(
             f"模型连续 {self.max_parse_retries} 次未返回合法食谱：{last_error}"
         )
+
+    def judge_plan(
+            self,
+            request: DietRequest,
+            plan: DietPlan,
+            bmi: float,
+            bmr: float,
+    ) -> JudgeVerdict:
+        prompt = self._build_judge_prompt(request, plan, bmi, bmr)
+        last_error = None
+        for _ in range(self.max_parse_retries):
+            try:
+                resp = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0,
+                )
+                raw = resp.choices[0].message.content or "{}"
+                data = self._extract_json(raw)
+                return JudgeVerdict.model_validate(data)
+            except (json.JSONDecodeError, ValidationError) as e:
+                last_error = e
+            except OpenAIError as e:
+                raise PlanGenerationError(f"调用审查模型失败：{e}") from e
+        raise PlanGenerationError(
+            f"审查模型连续 {self.max_parse_retries} 次未返回合法判定：{last_error}"
+        )
+
     @staticmethod
     def _extract_json(text: str) -> dict:
         text = text.strip()
@@ -190,5 +265,47 @@ class DeepSeekLLM():
             lines.append("你上一版生成的食谱存在以下问题，请针对性修正后重新输出完整 JSON：")
             lines.extend(f"- {v}" for v in feedback)
         return "\n".join(lines)
+
+    def _build_judge_prompt(
+            self,
+            request: DietRequest,
+            plan: DietPlan,
+            bmi: float,
+            bmr: float,
+    ) -> str:
+        analysis = analyze_plan(plan)
+        schema = json.dumps(JudgeVerdict.model_json_schema(), ensure_ascii=False)
+        request_data = json.dumps(
+            request.model_dump(), ensure_ascii=False, indent=2
+        )
+        plan_data = json.dumps(plan.model_dump(), ensure_ascii=False, indent=2)
+
+        return "\n".join([
+            "以下食谱已经通过过敏原、允许食材、预算、热量和蛋白质的硬规则校验。",
+            "请只依据质量审查标准给出否决或批准结论，不要修改食谱。",
+            "",
+            "用户需求：",
+            request_data,
+            "",
+            "系统确定性计算（事实数据，禁止推翻）：",
+            f"- 成本：{analysis.cost:.2f} 元，预算：{request.daily_budget:.2f} 元",
+            f"- 热量：{analysis.kcal:.1f} kcal",
+            f"- 蛋白质：{analysis.protein:.1f} g",
+            f"- BMI：{bmi:.1f}",
+            f"- BMR：{bmr:.1f} kcal",
+            "",
+            "待审查食谱：",
+            plan_data,
+            "",
+            "质量审查标准：",
+            "- 早餐、午餐、晚餐是否完整，各餐是否有合理的主食、蛋白质和蔬果。",
+            "- 同一餐中的食材和菜品是否可以实际烹饪、搭配是否合理。",
+            "- 单份用量是否明显超出正常饮食范围。",
+            "- 三餐是否严重重复，缺少基本多样性。",
+            "- 方案是否明显不符合减脂、维持或增肌目标。",
+            "",
+            "只返回符合以下 JSON Schema 的对象：",
+            schema,
+        ])
 
 
