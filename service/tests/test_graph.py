@@ -83,6 +83,26 @@ PASSING_PLAN = {
 }
 
 
+CHEAP_PLAN = {
+    "meals": [
+        {
+            "name": "早餐",
+            "dishes": [
+                {
+                    "name": "米饭配黄豆",
+                    "ingredients": [
+                        {"name": "米饭", "amount_g": 700},
+                        {"name": "黄豆", "amount_g": 200},
+                        {"name": "食用油", "amount_g": 20},
+                    ],
+                }
+            ],
+        }
+    ],
+    "notes": "极低成本测试方案",
+}
+
+
 def veto_verdict() -> JudgeVerdict:
     return JudgeVerdict(
         approved=False,
@@ -115,6 +135,12 @@ class QualityGateLLM:
         verdict = self.verdicts[min(self.judge_calls, len(self.verdicts) - 1)]
         self.judge_calls += 1
         return verdict
+
+
+class CheapPlanLLM(QualityGateLLM):
+    def generate_plan(self, request, feedback=None):
+        self.feedbacks.append(feedback)
+        return DietPlan.model_validate(CHEAP_PLAN)
 
 
 class AlwaysViolatingLLM:
@@ -166,7 +192,7 @@ def test_infeasible_budget_skips_llm(monkeypatch):
     monkeypatch.setattr(graph_module, "_llm", NeverCalledLLM())
 
     result = build_graph().invoke(
-        initial_state(make_request(daily_budget=5))
+        initial_state(make_request(daily_budget=9))
     )
 
     assert result["status"] == "failed"
@@ -221,6 +247,28 @@ def test_quality_veto_respects_max_retries(monkeypatch):
     assert llm.judge_calls == 2
     assert result["violations"] == []
     assert result["quality_feedback"]
+
+
+def test_policy_blocks_unrealistic_plan_even_when_judge_approves(monkeypatch):
+    llm = CheapPlanLLM([
+        JudgeVerdict(approved=True, score=95, summary="模型误判为通过")
+    ])
+    monkeypatch.setattr(graph_module, "_llm", llm)
+
+    result = build_graph().invoke(
+        initial_state(make_request(daily_budget=10), max_retries=1)
+    )
+
+    assert result.get("infeasible_reason") is None
+    assert result["status"] == "failed"
+    assert result["retry_count"] == 1
+    assert llm.judge_calls == 2
+    assert result["violations"] == []
+    assert result["quality_verdict"].approved is False
+    assert any(
+        "blocking" in item and "三餐能量分配失衡" in item
+        for item in result["quality_feedback"]
+    )
 
 
 def test_judge_error_fails_closed_without_returning_plan(monkeypatch):

@@ -49,6 +49,7 @@ class QualityIssue(BaseModel):
         "cooking",
         "variety",
         "goal_alignment",
+        "realism",
         "other",
     ]
     severity: Literal["blocking", "major", "minor"]

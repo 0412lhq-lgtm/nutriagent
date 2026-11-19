@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import app.agent.llm as llm_module
-from app.agent.llm import DeepSeekLLM, PlanGenerationError
+from app.agent.llm import DeepSeekLLM, JUDGE_SYSTEM_PROMPT, PlanGenerationError
 from app.schemas import DietPlan, DietRequest, JudgeVerdict
 
 VALID_PLAN = {
@@ -164,3 +164,16 @@ def test_judge_rejects_inconsistent_verdict(monkeypatch):
         llm.judge_plan(make_request(), plan, bmi=22.9, bmr=1700)
 
     assert completions.calls == 2
+
+
+def test_judge_prompt_requires_long_term_adherence(monkeypatch):
+    llm, _ = make_llm(monkeypatch, ["{}"])
+    plan = DietPlan.model_validate(VALID_PLAN)
+
+    prompt = llm._build_judge_prompt(make_request(), plan, bmi=22.9, bmr=1700)
+
+    assert "长期可遵循性" in prompt
+    assert "category=realism" in prompt
+    assert "severity=blocking" in prompt
+    assert "approved=false" in prompt
+    assert "不能长期遵循" in JUDGE_SYSTEM_PROMPT

@@ -2,8 +2,9 @@ from typing import Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from app.agent.food_table import MIN_DAILY_COST
+from app.agent.food_table import MIN_TEST_BUDGET
 from app.agent.llm import DeepSeekLLM, MockLLM, PlanGenerationError
+from app.agent.realism import audit_plan_realism
 from app.agent.tools import (
     calculate_bmi,
     calculate_bmr,
@@ -50,11 +51,11 @@ def calculate_metrics(state: AgentState) -> dict:
 def check_feasibility(state: AgentState) -> dict:
     """调模型之前先判断预算是否根本不可行。"""
     req = state["request"]
-    if req.daily_budget < MIN_DAILY_COST:
+    if req.daily_budget < MIN_TEST_BUDGET:
         return {
             "infeasible_reason": (
-                f"预算 {req.daily_budget} 元低于一日最低可行成本 "
-                f"{MIN_DAILY_COST} 元，无法在保证营养的前提下生成食谱"
+                f"预算 {req.daily_budget} 元低于允许测试的最低预算 "
+                f"{MIN_TEST_BUDGET} 元，无法进入生成流程"
             ),
             "status": "failed",
         }
@@ -91,6 +92,32 @@ def review(state: AgentState) -> dict:
     }
 
 
+def _apply_realism_policy(
+    verdict: JudgeVerdict,
+    plan: DietPlan,
+) -> JudgeVerdict:
+    """用确定性规则兜底，保证无法长期遵循的方案一定被否决。"""
+    policy_issues = audit_plan_realism(plan)
+    if not policy_issues:
+        return verdict
+
+    existing = {(issue.category, issue.evidence) for issue in verdict.issues}
+    new_issues = [
+        issue
+        for issue in policy_issues
+        if (issue.category, issue.evidence) not in existing
+    ]
+    if not new_issues:
+        return verdict
+
+    return JudgeVerdict(
+        approved=False,
+        score=min(verdict.score, 60),
+        issues=[*verdict.issues, *new_issues],
+        summary="长期可遵循性审查未通过",
+    )
+
+
 def quality_review(state: AgentState) -> dict:
     """独立质量审查节点：只输出判定和意见，不修改食谱。"""
     plan = state["plan"]
@@ -115,6 +142,7 @@ def quality_review(state: AgentState) -> dict:
             "status": "failed",
         }
 
+    verdict = _apply_realism_policy(verdict, plan)
     feedback = [
         (
             f"[质量审查/{issue.severity}] {issue.evidence}"

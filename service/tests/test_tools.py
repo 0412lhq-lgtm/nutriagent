@@ -78,7 +78,7 @@ def test_lookup_unknown_food_returns_none():
 
 def test_analyze_plan_sums_cost_kcal_protein():
     analysis = analyze_plan(make_plan(("燕麦", 80), ("香蕉", 150)))
-    assert analysis.cost == 1.71
+    assert analysis.cost == 2.25
     assert analysis.kcal == 441.1
     assert analysis.protein == 14.1
     assert analysis.unknown == []
@@ -88,7 +88,7 @@ def test_analyze_plan_reports_unknown_ingredients():
     analysis = analyze_plan(make_plan(("燕麦", 80), ("神秘果", 100)))
     assert analysis.unknown == ["神秘果"]
     # 表外食材不计价，只统计已知部分
-    assert analysis.cost == 0.96
+    assert analysis.cost == 1.2
 
 
 def test_check_allergens_matches_aliases():
@@ -111,10 +111,10 @@ def test_check_known_ingredients():
 
 
 def test_check_budget_uses_table_price():
-    plan = make_plan(("牛排", 800))  # 8 元/100g → 64 元
+    plan = make_plan(("牛排", 800))  # 9 元/100g → 72 元
     violations = check_budget(plan, 30)
     assert len(violations) == 1
-    assert "64.0" in violations[0]
+    assert "72.0" in violations[0]
     assert check_budget(plan, 100) == []
 
 
@@ -129,12 +129,12 @@ def test_check_nutrition_detects_low_kcal_and_protein():
 
 def test_decorate_plan_adds_totals_and_per_ingredient_values():
     data = decorate_plan(make_plan(("燕麦", 80), ("香蕉", 150)))
-    assert data["total_cost"] == 1.71
+    assert data["total_cost"] == 2.25
     assert data["total_kcal"] == 441.1
     assert data["total_protein"] == 14.1
 
     first = data["meals"][0]["dishes"][0]["ingredients"][0]
-    assert first["cost"] == 0.96
+    assert first["cost"] == 1.2
     assert first["kcal"] == 301.6
     assert first["protein"] == 12.0
 

@@ -12,7 +12,7 @@
         type="warning"
         :closable="false"
         class="feedback"
-        title="审查反馈（未通过的硬规则）"
+        :title="record.status === 'success' ? '审查反馈（包含质量建议）' : '审查反馈（未通过原因）'"
       >
         <pre class="feedback-text">{{ record.review_feedback }}</pre>
       </el-alert>

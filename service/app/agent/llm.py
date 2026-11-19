@@ -1,5 +1,5 @@
 import json
-from app.agent.food_table import MIN_DAILY_COST, prompt_table
+from app.agent.food_table import MIN_TEST_BUDGET, prompt_table
 from app.agent.tools import analyze_plan, calculate_bmr, min_daily_kcal, min_daily_protein
 from pydantic import ValidationError
 from openai import OpenAI, OpenAIError
@@ -105,7 +105,7 @@ class MockLLM:
             bmi: float,
             bmr: float,
     ) -> JudgeVerdict:
-        """模拟质量审查：初次生成的 Mock 方案被否决，重写后的方案通过。"""
+        """模拟质量审查：初次生成的 Mock 方案被否决。"""
         if plan.notes.startswith("Mock 初次"):
             return JudgeVerdict(
                 approved=False,
@@ -142,9 +142,16 @@ SYSTEM_PROMPT = (
 JUDGE_SYSTEM_PROMPT = (
     "你是一名独立的食谱质量审查员，只对确定性规则无法判断的质量问题行使否决权。"
     "系统给出的成本、热量、蛋白质、BMI 和 BMR 均来自 Python 工具，是事实数据，"
-    "禁止重新计算或质疑它们，也不要审查过敏原、预算等已经由硬规则检查的内容。"
-    "你只审查：三餐结构是否完整、菜品与食材搭配是否合理、份量是否现实、"
-    "烹饪方式是否可行、菜品是否严重重复、方案是否明显偏离用户目标。"
+    "禁止重新计算或质疑系统给出的数值；不要重复审查过敏原或是否超过预算。"
+    "你的核心职责是判断整份一日三餐是否现实、可执行，以及能否作为日常饮食长期遵循，"
+    "而不只是数值是否达标。"
+    "需要审查：三餐结构、菜品与食材搭配、份量、烹饪可行性、多样性、"
+    "方案是否符合用户目标，以及按实际总成本能否在现实中买到、制作并长期正常食用。"
+    "如果方案在现实中不可执行，例如成本明显不足以覆盖一日正常饮食、份量明显吃不饱或吃不完、"
+    "食材组合无法正常烹饪、使用异常份量凑够营养指标，或者食材和菜品高度重复、结构单调、"
+    "依赖极端低价或特殊采购，导致正常人无法连续多日遵循，"
+    "必须判为 realism 的 blocking 问题，并设置 approved=false。"
+    "即使热量、蛋白质和预算都已达标，只要方案不能长期遵循，仍然必须 blocking。"
     "禁止因为个人口味、风格偏好或缺乏证据的猜测而否决。"
     "每个 blocking 问题必须写明具体餐次、菜品或食材作为 evidence，并给出可执行的 suggestion。"
     "只有存在 blocking 问题时才能 approved=false；没有 blocking 问题时 approved 必须为 true，"
@@ -236,8 +243,11 @@ class DeepSeekLLM():
         floor_kcal = min_daily_kcal(bmr, request.goal)
         floor_protein = min_daily_protein(request.weight)
         goal_text = {"lose": "减脂", "maintain": "维持", "gain": "增肌"}[request.goal]
-        # 软引导的目标成本下限：预算的 60%，但不低于系统最低可行成本
-        budget_low = max(MIN_DAILY_COST, request.daily_budget * 0.6)
+        # 软引导的目标成本下限：尽量用足预算，但不能给出超过预算的目标
+        budget_low = min(
+            request.daily_budget,
+            max(MIN_TEST_BUDGET, request.daily_budget * 0.6),
+        )
 
         lines = [
             "请为下述用户设计一日三餐（必须包含早餐、午餐、晚餐）：",
@@ -251,6 +261,11 @@ class DeepSeekLLM():
             f"若预算明显偏高，以营养均衡为准，不必刻意花完，也不要让热量明显超标",
             f"- 每日最低热量：{floor_kcal:.0f} kcal（必须达到）",
             f"- 每日最低蛋白质：{floor_protein:.0f} g（必须达到）",
+            "- 方案必须现实可执行：不能用异常小份量、单一食材或不可能的成本凑够指标；"
+            "质量审查会驳回现实中不可执行的方案",
+            "- 三餐热量应相对均衡：午餐不少于全天的 20%，晚餐不超过 45%。",
+            "- 晚餐蛋白质不要超过全天的 55%。",
+            "- 午餐和晚餐不能使用同一种蔬菜，全天水果不少于 100 g。",
             f"- 过敏原（绝对不能出现）：{request.allergies or '无'}",
             f"- 忌口：{request.dislikes or '无'}",
             "",
@@ -300,9 +315,16 @@ class DeepSeekLLM():
             "质量审查标准：",
             "- 早餐、午餐、晚餐是否完整，各餐是否有合理的主食、蛋白质和蔬果。",
             "- 同一餐中的食材和菜品是否可以实际烹饪、搭配是否合理。",
-            "- 单份用量是否明显超出正常饮食范围。",
+            "- 单份用量是否明显超出正常饮食范围，或小到无法提供饱腹感。",
             "- 三餐是否严重重复，缺少基本多样性。",
             "- 方案是否明显不符合减脂、维持或增肌目标。",
+            "- 整体现实性：结合实际总成本、食材用量和一般市场价格，这一天饮食"
+            "能否被真实购买、制作并正常吃完；明显不现实时必须给出 realism/blocking。",
+            "- 长期可遵循性：方案是否因食材高度重复、菜品雷同、极端低成本、份量异常"
+            "或采购困难而无法连续多日执行。即使热量、蛋白质和预算都达标，"
+            "只要不能长期遵循，也必须返回 category=realism、severity=blocking、approved=false。",
+            "- 重点检查三餐热量和蛋白质分配、午餐与晚餐是否重复使用同一种蔬菜、"
+            "以及全天水果是否充足；这些方面明显失衡同样属于长期不可遵循。",
             "",
             "只返回符合以下 JSON Schema 的对象：",
             schema,
